@@ -2,8 +2,10 @@ import sys
 import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QLineEdit, QPushButton, QTextEdit, 
-                            QLabel, QMessageBox, QComboBox)
-from PyQt6.QtCore import Qt
+                            QLabel, QMessageBox, QComboBox, QDialog, QFrame,
+                            QStyle, QGroupBox, QFormLayout)
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QDesktopServices
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -28,6 +30,7 @@ class CategorySelector:
         self.category_combos = {}
         self.category_tree = {}
         self.current_path = {}
+        self.required_specifics = {}  # Store required item specifics
         
         # Add first level
         self.add_category_level(0)
@@ -107,6 +110,55 @@ class CategorySelector:
             print(f"Error fetching categories: {str(e)}")
             return None
             
+    def fetch_item_specifics(self, category_id):
+        """Fetch required item specifics for a category"""
+        try:
+            with open('ebay.yaml', 'r') as f:
+                config = yaml.safe_load(f)
+            
+            headers = {
+                'Authorization': f'Bearer {config["token"]}',
+                'Content-Type': 'application/json'
+            }
+            
+            # Get the default category tree ID
+            response = requests.get(
+                'https://api.ebay.com/commerce/taxonomy/v1/get_default_category_tree_id?marketplace_id=EBAY_US',
+                headers=headers
+            )
+            
+            if response.status_code != 200:
+                raise Exception(f"Failed to get category tree ID: {response.text}")
+                
+            tree_id = response.json()['categoryTreeId']
+            
+            # Get item specifics for the category
+            response = requests.get(
+                f'https://api.ebay.com/commerce/taxonomy/v1/category_tree/{tree_id}/get_item_aspects_for_category?category_id={category_id}',
+                headers=headers
+            )
+            
+            if response.status_code != 200:
+                raise Exception(f"Failed to get item specifics: {response.text}")
+            
+            data = response.json()
+            required_aspects = {}
+            
+            # Extract required aspects and their valid values
+            if 'aspects' in data:
+                for aspect in data['aspects']:
+                    if aspect.get('aspectConstraint', {}).get('aspectRequired', False):
+                        name = aspect['localizedAspectName']
+                        values = aspect.get('aspectValues', [])
+                        valid_values = [val.get('localizedValue') for val in values if 'localizedValue' in val]
+                        required_aspects[name] = valid_values
+            
+            return required_aspects
+            
+        except Exception as e:
+            print(f"Error fetching item specifics: {str(e)}")
+            return {}
+
     def on_category_selected(self, level):
         """Handle category selection at a specific level"""
         if level not in self.category_combos:
@@ -145,6 +197,12 @@ class CategorySelector:
                     
                     # Connect the new dropdown's selection event
                     new_combo.currentIndexChanged.connect(lambda: self.on_category_selected(next_level))
+                else:
+                    # This is a leaf category - fetch required item specifics
+                    self.required_specifics = self.fetch_item_specifics(category_id)
+                    print(f"Required item specifics for category {category_id}:")
+                    for name, values in self.required_specifics.items():
+                        print(f"- {name}: {', '.join(values) if values else 'Any value'}")
                     
         except Exception as e:
             print(f"Error in category selection: {str(e)}")
@@ -155,6 +213,82 @@ class CategorySelector:
         if not self.current_path:
             return None
         return list(self.current_path.values())[-1]
+        
+    def get_required_specifics(self):
+        """Get the required item specifics for the selected category"""
+        return self.required_specifics
+
+class ListingSuccessDialog(QDialog):
+    def __init__(self, item_id, title, price, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("✓ Listing Created Successfully!")
+        self.setMinimumWidth(400)
+        
+        # Create layout
+        layout = QVBoxLayout()
+        
+        # Add success icon and message
+        icon_label = QLabel()
+        success_pixmap = self.style().standardIcon(QStyle.SP_DialogApplyButton).pixmap(64, 64)
+        icon_label.setPixmap(success_pixmap)
+        icon_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(icon_label)
+        
+        success_label = QLabel("Item Successfully Listed on eBay!")
+        success_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #2ecc71; margin-top: 10px;")
+        success_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(success_label)
+        
+        # Item details
+        details_group = QGroupBox("Listing Details")
+        details_layout = QFormLayout()
+        
+        # Add details with word wrap for long text
+        id_label = QLabel(str(item_id))
+        title_label = QLabel(title)
+        title_label.setWordWrap(True)
+        price_label = QLabel(f"${price}")
+        
+        details_layout.addRow("Item ID:", id_label)
+        details_layout.addRow("Title:", title_label)
+        details_layout.addRow("Price:", price_label)
+        
+        details_group.setLayout(details_layout)
+        layout.addWidget(details_group)
+        
+        # View listing button
+        view_button = QPushButton("View on eBay")
+        view_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2ecc71;
+                color: white;
+                padding: 8px;
+                border-radius: 4px;
+                font-weight: bold;
+                margin-top: 10px;
+            }
+            QPushButton:hover {
+                background-color: #27ae60;
+            }
+        """)
+        view_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(f"https://www.ebay.com/itm/{item_id}")))
+        layout.addWidget(view_button)
+        
+        # Close button
+        close_button = QPushButton("Close")
+        close_button.setStyleSheet("""
+            QPushButton {
+                padding: 8px;
+                margin-top: 5px;
+            }
+        """)
+        close_button.clicked.connect(self.accept)
+        layout.addWidget(close_button)
+        
+        self.setLayout(layout)
+        
+        # Set window flags to make it appear as a proper dialog
+        self.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
 
 class AmazonEbayScraper(QMainWindow):
     def __init__(self):
@@ -427,7 +561,7 @@ Product Details:
             os.remove(local_path)
             print("Cleaned up local file")
             
-            return direct_link
+            return direct_link, dropbox_path
             
         except requests.exceptions.RequestException as e:
             print(f"Error downloading or verifying image: {str(e)}")
@@ -441,9 +575,15 @@ Product Details:
 
     def post_to_ebay(self):
         if not self.product_data:
-            QMessageBox.warning(self, "Error", "No product data to post")
+            QMessageBox.warning(self, "Error", "Please scrape a product first")
             return
             
+        if not self.category_selector.get_selected_category_id():
+            QMessageBox.warning(self, "Error", "Please select a category")
+            return
+            
+        dropbox_path = None  # Store Dropbox path for cleanup
+        
         try:
             # Load eBay credentials from config
             with open('ebay.yaml', 'r') as f:
@@ -466,7 +606,7 @@ Product Details:
             
             # Upload image to Dropbox and get direct link
             try:
-                hosted_image_url = self.upload_to_dropbox(image_url)
+                hosted_image_url, dropbox_path = self.upload_to_dropbox(image_url)
                 print(f"Successfully got hosted image URL: {hosted_image_url}")
                 
                 # Verify the image URL is valid and accessible
@@ -488,9 +628,14 @@ Product Details:
             # Clean up and format the price
             price = str(self.product_data["price"]).replace("$", "").replace(",", "").strip()
             try:
-                price = "{:.2f}".format(float(price))
+                # Convert to float and apply 15% discount
+                original_price = float(price)
+                discounted_price = original_price * 0.85  # 15% discount
+                price = "{:.2f}".format(discounted_price)
+                print(f"Original price: ${original_price:.2f}, Discounted price: ${price}")
             except:
                 price = "99.99"  # Default price if parsing fails
+                print("Failed to parse price, using default price")
             
             # Extract shipping dimensions and weight from product details
             dimensions = "12 x 12 x 12"  # Default dimensions
@@ -521,6 +666,35 @@ Product Details:
                 if "ASIN" in details:
                     sku = details["ASIN"]
             
+            # Get required item specifics
+            required_specifics = self.category_selector.get_required_specifics()
+            
+            # Prepare item specifics
+            item_specifics_list = []
+            
+            # Add default specifics
+            default_specifics = {
+                "Brand": "Unbranded",
+                "Type": "Other"
+            }
+            
+            # Merge with required specifics
+            for name, values in required_specifics.items():
+                if name not in default_specifics:
+                    # If valid values are provided, use the first one, otherwise use "Unspecified"
+                    value = values[0] if values else "Unspecified"
+                    default_specifics[name] = value
+            
+            # Convert to XML format
+            for name, value in default_specifics.items():
+                item_specifics_list.append(f"""
+      <NameValueList>
+        <Name>{escape(name)}</Name>
+        <Value>{escape(value)}</Value>
+      </NameValueList>""")
+            
+            item_specifics_xml = "\n".join(item_specifics_list)
+            
             # Prepare headers for eBay Trading API
             headers = {
                 'X-EBAY-API-SITEID': '0',  # US site
@@ -533,6 +707,10 @@ Product Details:
             }
             
             # Prepare AddItem XML request
+            # Escape special characters in title and description
+            title = escape(self.product_data["title"][:80])
+            description = escape(self.product_data["description"])
+            
             xml_request = f"""<?xml version="1.0" encoding="utf-8"?>
 <AddItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
   <RequesterCredentials>
@@ -541,8 +719,8 @@ Product Details:
   <ErrorLanguage>en_US</ErrorLanguage>
   <WarningLevel>High</WarningLevel>
   <Item>
-    <Title>{self.product_data["title"][:80]}</Title>
-    <Description><![CDATA[{self.product_data["description"]}]]></Description>
+    <Title>{title}</Title>
+    <Description><![CDATA[{description}]]></Description>
     <PrimaryCategory>
       <CategoryID>{self.category_selector.get_selected_category_id()}</CategoryID>
     </PrimaryCategory>
@@ -554,22 +732,13 @@ Product Details:
     <ListingDuration>GTC</ListingDuration>
     <ListingType>FixedPriceItem</ListingType>
     <PictureDetails>
-      <PhotoDisplay>PicturePack</PhotoDisplay>
       <GalleryType>Gallery</GalleryType>
       <PictureURL>{hosted_image_url}</PictureURL>
     </PictureDetails>
     <PostalCode>95125</PostalCode>
     <Quantity>1</Quantity>
     <SKU>{sku}</SKU>
-    <ItemSpecifics>
-      <NameValueList>
-        <Name>Brand</Name>
-        <Value>Unbranded</Value>
-      </NameValueList>
-      <NameValueList>
-        <Name>Type</Name>
-        <Value>Other</Value>
-      </NameValueList>
+    <ItemSpecifics>{item_specifics_xml}
     </ItemSpecifics>
     <ShippingPackageDetails>
       <MeasurementUnit>English</MeasurementUnit>
@@ -614,9 +783,24 @@ Product Details:
             # Check for success
             ack = root.find(".//Ack")
             if ack is not None and ack.text == "Success":
+                # Clean up Dropbox file after successful listing
+                if dropbox_path:
+                    try:
+                        self.dbx.files_delete_v2(dropbox_path)
+                        print(f"Successfully deleted file from Dropbox: {dropbox_path}")
+                    except Exception as e:
+                        print(f"Warning: Failed to delete Dropbox file: {str(e)}")
+                
                 item_id = root.find(".//ItemID")
                 if item_id is not None:
-                    QMessageBox.information(self, "Success", f"Item listed successfully! Item ID: {item_id.text}")
+                    # Show success dialog with listing details
+                    dialog = ListingSuccessDialog(
+                        item_id=item_id.text,
+                        title=self.product_data["title"],
+                        price=price,
+                        parent=self
+                    )
+                    dialog.exec()
                 else:
                     QMessageBox.information(self, "Success", "Item listed successfully!")
             else:
